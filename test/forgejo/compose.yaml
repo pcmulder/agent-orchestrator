@@ -1,0 +1,77 @@
+# Local Forgejo test instance for the AO Forgejo provider.
+#
+# Conventions mirror cloud/compose.yaml: fixed project name, loopback-only
+# port binding, postgres:17, healthchecks, init SQL under test/forgejo/,
+# and all data under ${AO_DATA_DIR:-$HOME/.ao} (nothing elsewhere).
+#
+#   AO_FORGEJO_TEST_PORT        HTTP port, default 3000
+#   AO_FORGEJO_TEST_DB_PORT     postgres port (diagnostics), default 54330
+#
+# Plain HTTP by design: the provider must respect the remote's scheme.
+
+name: ao-forgejo-local
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: forgejo
+      POSTGRES_USER: ao_forgejo_bootstrap
+      POSTGRES_PASSWORD: ao_forgejo_local_bootstrap
+    ports:
+      - "127.0.0.1:${AO_FORGEJO_TEST_DB_PORT:-54330}:5432"
+    volumes:
+      - "${AO_FORGEJO_DATA_DIR:-${AO_DATA_DIR:-${HOME}/.ao}/forgejo/postgres}:/var/lib/postgresql/data"
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-runtime-role.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ao_forgejo -d forgejo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:16.0.3 # latest stable release as of 2026-08-29
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      GITEA__database__DB_TYPE: postgres
+      GITEA__database__HOST: postgres:5432
+      GITEA__database__NAME: forgejo
+      GITEA__database__USER: ao_forgejo
+      GITEA__database__PASSWD: ao_forgejo_local
+      GITEA__server__DOMAIN: 127.0.0.1
+      GITEA__server__ROOT_URL: "http://127.0.0.1:${AO_FORGEJO_TEST_PORT:-3000}/"
+      GITEA__server__SSH_DOMAIN: 127.0.0.1
+      GITEA__server__SSH_PORT: "22"
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__security__SECRET_KEY: local-test-forgejo-secret
+      GITEA__security__INTERNAL_TOKEN: local-test-forgejo-internal
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__service__ALLOW_REGISTER_WITHOUT_EMAIL: "false"
+      GITEA__service__REQUIRE_SIGNIN_VIEW: "false"
+      GITEA__repository__DEFAULT_BRANCH: main
+    # USER_UID/GID only govern the runtime user; `compose exec` defaults to
+    # the image's root, and the Forgejo admin CLI refuses to run as root —
+    # so all `forgejo admin ...` invocations pass -u 1000:1000 explicitly.
+    ports:
+      - "127.0.0.1:${AO_FORGEJO_TEST_PORT:-3000}:3000"
+    volumes:
+      # Owner is root (the runtime user is uid 1000 via USER_UID, which the
+      # entrypoint chmods on startup). The admin CLI runs as 1000:1000 and
+      # needs write access to /data for `forgejo admin ...`.
+      - "${AO_FORGEJO_DATA_DIR:-${AO_DATA_DIR:-${HOME}/.ao}/forgejo/app}:/data"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # Forgejo 16 exposes the health API at /api/healthz (the v1 API path
+      # /api/v1/healthz does not exist in this build — it 404s).
+      test:
+        ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/healthz | grep -q '\"status\": \"pass\"' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
