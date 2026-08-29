@@ -98,6 +98,20 @@ type GitLabConfig struct {
 	HostTokens map[string]string
 }
 
+// ForgejoConfig carries the self-hosted Forgejo host allowlist and per-host
+// token overrides. It is loaded once at daemon boot from environment variables
+// (no hot-reload), matching the existing config pattern. Unlike GitLab there
+// is no default public host: every host must appear in AllowedHosts.
+type ForgejoConfig struct {
+	// AllowedHosts is the list of self-hosted Forgejo hosts (each may include a
+	// port, e.g. "forgejo.internal:3000" or "127.0.0.1:3000").
+	AllowedHosts []string
+	// HostTokens maps a host to a token override. Hosts in AllowedHosts
+	// without an explicit entry fall back to the default token
+	// (AO_FORGEJO_TOKEN / FORGEJO_TOKEN).
+	HostTokens map[string]string
+}
+
 // DefaultAllowedOrigins are the browser origins the daemon's CORS boundary
 // trusts, beyond loopback-served content (which the middleware always trusts —
 // local pages can reach the no-auth daemon directly anyway). The daemon has no
@@ -151,6 +165,9 @@ type Config struct {
 	// GitLab carries the self-managed GitLab host allowlist and per-host
 	// token overrides, loaded once at boot from environment variables.
 	GitLab GitLabConfig
+	// Forgejo carries the self-hosted Forgejo host allowlist and per-host
+	// token overrides, loaded once at boot from environment variables.
+	Forgejo ForgejoConfig
 	// Client identifies which client this deployment serves (AO_CLIENT). Empty
 	// means no client identity, which keeps client-gated offerings off.
 	Client string
@@ -197,6 +214,8 @@ func (c Config) Addr() string {
 //	AO_TELEMETRY_POSTHOG_HOST  PostHog host (default DefaultTelemetryPostHogHost)
 //	AO_GITLAB_ALLOWED_HOSTS    comma-separated self-managed GitLab hosts (each may include :port)
 //	AO_GITLAB_HOST_TOKENS      host=token,host=token per-host token overrides
+//	AO_FORGEJO_ALLOWED_HOSTS   comma-separated self-hosted Forgejo hosts (each may include :port)
+//	AO_FORGEJO_HOST_TOKENS     host=token,host=token per-host token overrides
 //	AO_CLIENT                  client identity for offering gates (trimmed, default empty)
 //	AO_CLOUD_OFFERING          cloud offering flag off|on (default off)
 //	AO_LOCAL_OFFERING          local offering off|on (default on)
@@ -332,6 +351,26 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 		cfg.GitLab.HostTokens = tokens
+	}
+
+	if raw, ok := os.LookupEnv("AO_FORGEJO_ALLOWED_HOSTS"); ok && raw != "" {
+		hosts := make([]string, 0, 4)
+		for _, h := range strings.Split(raw, ",") {
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			hosts = append(hosts, h)
+		}
+		cfg.Forgejo.AllowedHosts = hosts
+	}
+
+	if raw, ok := os.LookupEnv("AO_FORGEJO_HOST_TOKENS"); ok && raw != "" {
+		tokens, err := parseHostTokenMap("AO_FORGEJO_HOST_TOKENS", raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Forgejo.HostTokens = tokens
 	}
 
 	if raw := os.Getenv("AO_CLIENT"); raw != "" {

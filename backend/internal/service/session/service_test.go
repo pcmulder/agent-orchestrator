@@ -3752,7 +3752,8 @@ func TestNormalizePRRefGitLab(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			url, n, err := normalizePRRef(tc.ref, tc.repoOrigin)
+			var provider scmProvider
+			url, n, err := normalizePRRef(tc.ref, tc.repoOrigin, provider)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got url=%s n=%d", url, n)
@@ -3767,6 +3768,43 @@ func TestNormalizePRRefGitLab(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNormalizePRRefForgejo(t *testing.T) {
+	// A full forgejo PR URL (/pulls/N, plural) is canonicalized by its path
+	// shape and keeps its scheme.
+	url, n, err := normalizePRRef("http://127.0.0.1:3000/acme/repo/pulls/9", "http://127.0.0.1:3000/acme/repo", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if url != "http://127.0.0.1:3000/acme/repo/pulls/9" || n != 9 {
+		t.Fatalf("got url=%s n=%d, want http://127.0.0.1:3000/acme/repo/pulls/9 9", url, n)
+	}
+
+	// A numeric ref resolves to a /pulls/N URL when the configured provider
+	// classifies the origin as forgejo.
+	fj := staticProviderRepo{repo: ports.SCMRepo{Provider: "forgejo", Host: "127.0.0.1:3000", Scheme: "http", Owner: "acme", Name: "repo", Repo: "acme/repo"}}
+	url, n, err = normalizePRRef("9", "http://127.0.0.1:3000/acme/repo", fj)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if url != "http://127.0.0.1:3000/acme/repo/pulls/9" || n != 9 {
+		t.Fatalf("got url=%s n=%d, want http://127.0.0.1:3000/acme/repo/pulls/9 9", url, n)
+	}
+}
+
+type staticProviderRepo struct {
+	repo ports.SCMRepo
+}
+
+func (p staticProviderRepo) ParseRepository(_ string) (ports.SCMRepo, bool) {
+	return p.repo, p.repo.Provider != ""
+}
+func (p staticProviderRepo) FetchPullRequests(_ context.Context, refs []ports.SCMPRRef) ([]ports.SCMObservation, error) {
+	return nil, nil
+}
+func (p staticProviderRepo) FetchReviewThreads(_ context.Context, _ ports.SCMPRRef) (ports.SCMReviewObservation, error) {
+	return ports.SCMReviewObservation{}, nil
 }
 
 func TestRequireSameRepoGitLab(t *testing.T) {

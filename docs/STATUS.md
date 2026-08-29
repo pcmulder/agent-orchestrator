@@ -78,10 +78,10 @@ surface (`npm run sqlc`, `npm run api`).
   `pr_merged`, and `pr_closed_unmerged`: backend enrichment/persistence,
   cursor-paginated read/unread history, live notification stream, and read
   acknowledgement API.
-- SCM observer (`internal/observe/scm`) wired into the daemon: GitHub provider,
-  lazy/non-blocking auth, per-PR polling with ETag guards and semantic diffing,
-  feeding PR facts into lifecycle, which sends agent nudges for CI failures,
-  review feedback, and merge conflicts
+- SCM observer (`internal/observe/scm`) wired into the daemon: GitHub, Forgejo, and
+  GitLab providers (via `adapters/scm/multi`), lazy/non-blocking auth, per-PR polling
+  with ETag/fingerprint guards and semantic diffing, feeding PR facts into lifecycle,
+  which sends agent nudges for CI failures, review feedback, and merge conflicts
   ([#75](https://github.com/aoagents/agent-orchestrator/issues/75),
   [#108](https://github.com/aoagents/agent-orchestrator/issues/108),
   [#109](https://github.com/aoagents/agent-orchestrator/issues/109)).

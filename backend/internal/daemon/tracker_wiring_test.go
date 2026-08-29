@@ -7,18 +7,95 @@ import (
 	"log/slog"
 	"testing"
 
+	trackerforgejo "github.com/aoagents/agent-orchestrator/backend/internal/adapters/tracker/forgejo"
 	trackergitlab "github.com/aoagents/agent-orchestrator/backend/internal/adapters/tracker/gitlab"
 	trackermulti "github.com/aoagents/agent-orchestrator/backend/internal/adapters/tracker/multi"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
-// TestNewGitLabTracker_PassesAllowedHosts verifies that AllowedHosts from
-// GitLabConfig flows into the tracker's Options. A self-managed host in
+// TestNewForgejoTracker_PassesAllowedHosts verifies that AllowedHosts from
+// ForgejoConfig flows into the tracker's Options. A self-hosted host in
 // AllowedHosts should be accepted by the tracker; one not in the list should
-// be rejected with ErrHostNotAllowed.
+// be rejected with ErrHostNotAllowed. Forgejo has no default host, so an
+// empty host is also rejected.
 //
 // Uses ConfigForHost (no network I/O) instead of Get to avoid real DNS/HTTP.
+func TestNewForgejoTracker_PassesAllowedHosts(t *testing.T) {
+	t.Setenv("AO_FORGEJO_TOKEN", "default-token")
+
+	selfHost := "forgejo.internal.example"
+	cfg := config.ForgejoConfig{
+		AllowedHosts: []string{selfHost},
+	}
+
+	tracker, err := newForgejoTracker(cfg)
+	if err != nil {
+		t.Fatalf("newForgejoTracker: %v", err)
+	}
+
+	fjTracker, ok := tracker.(*trackerforgejo.Tracker)
+	if !ok {
+		t.Fatalf("expected *trackerforgejo.Tracker, got %T", tracker)
+	}
+
+	// The allowlisted host should be accepted (not ErrHostNotAllowed).
+	if err := fjTracker.ConfigForHost(selfHost); err != nil {
+		t.Fatalf("allowlisted host %q was rejected by the tracker: %v", selfHost, err)
+	}
+
+	// An unconfigured host should be rejected with ErrHostNotAllowed.
+	err = fjTracker.ConfigForHost("forgejo.evil.example")
+	if !errors.Is(err, trackerforgejo.ErrHostNotAllowed) {
+		t.Fatalf("unconfigured host should be rejected with ErrHostNotAllowed, got: %v", err)
+	}
+
+	// Forgejo has no default host: an empty host must be rejected.
+	err = fjTracker.ConfigForHost("")
+	if !errors.Is(err, trackerforgejo.ErrHostNotAllowed) {
+		t.Fatalf("empty host should be rejected (forgejo has no default host), got: %v", err)
+	}
+}
+
+// TestNewForgejoTracker_HostTokensRoutedCorrectly verifies that per-host
+// tokens from ForgejoConfig flow into the tracker. Construction through the
+// wiring function plus allowlist acceptance prove the flow.
+func TestNewForgejoTracker_HostTokensRoutedCorrectly(t *testing.T) {
+	// A default token must also be present: the tracker fails fast when no
+	// token at all is configured, mirroring the GitLab tracker's behavior.
+	t.Setenv("AO_FORGEJO_TOKEN", "default-token")
+	cfg := config.ForgejoConfig{
+		AllowedHosts: []string{"forgejo.internal.example", "127.0.0.1:3000"},
+		HostTokens:   map[string]string{"forgejo.internal.example": "host-token", "127.0.0.1:3000": "local-token"},
+	}
+
+	tracker, err := newForgejoTracker(cfg)
+	if err != nil {
+		t.Fatalf("newForgejoTracker: %v", err)
+	}
+	fjTracker, ok := tracker.(*trackerforgejo.Tracker)
+	if !ok {
+		t.Fatalf("expected *trackerforgejo.Tracker, got %T", tracker)
+	}
+	if err := fjTracker.ConfigForHost("forgejo.internal.example"); err != nil {
+		t.Fatalf("host-token host rejected: %v", err)
+	}
+	if err := fjTracker.ConfigForHost("127.0.0.1:3000"); err != nil {
+		t.Fatalf("local host:port rejected: %v", err)
+	}
+}
+
+// TestNewMultiTracker_PassesForgejoConfig verifies that newMultiTracker
+// accepts a ForgejoConfig and wires the forgejo tracker when configured.
+func TestNewMultiTracker_PassesForgejoConfig(t *testing.T) {
+	t.Setenv("AO_FORGEJO_TOKEN", "forgejo-token")
+
+	cfg := config.ForgejoConfig{AllowedHosts: []string{"forgejo.internal.example"}}
+	tracker := newMultiTracker(config.GitLabConfig{}, cfg, slog.Default())
+	if tracker == nil {
+		t.Fatal("newMultiTracker = nil, want non-nil when forgejo token is available")
+	}
+}
 func TestNewGitLabTracker_PassesAllowedHosts(t *testing.T) {
 	t.Setenv("AO_GITLAB_TOKEN", "default-token")
 
@@ -216,7 +293,7 @@ func TestNewMultiTracker_WithGitLabConfig(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tracker := newMultiTracker(cfg, log)
+	tracker := newMultiTracker(cfg, config.ForgejoConfig{}, log)
 	if tracker == nil {
 		t.Fatal("newMultiTracker = nil, want non-nil when GitLab token is available")
 	}

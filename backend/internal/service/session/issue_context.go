@@ -47,7 +47,12 @@ func (s *Service) trackerIDForIssue(cfg ports.SpawnConfig, project domain.Projec
 	if native, host, ok := canonicalGitLabIssueURL(issue); ok {
 		return domain.TrackerID{Provider: domain.TrackerProviderGitLab, Native: native, Host: host}, true
 	}
-	// 3. Plain issue number — resolve repo from SCM origin or tracker-provider hint.
+	// 3. Try Forgejo issue URL (/issues/<iid> on a non-github.com self-hosted host).
+	// Placed after GitLab so the /-/issues/ form is not captured here.
+	if native, host, ok := canonicalForgejoIssueURL(issue); ok {
+		return domain.TrackerID{Provider: domain.TrackerProviderForgejo, Native: native, Host: host}, true
+	}
+	// 4. Plain issue number — resolve repo from SCM origin or tracker-provider hint.
 	n, err := strconv.Atoi(issue)
 	if err != nil || n <= 0 {
 		return domain.TrackerID{}, false
@@ -90,16 +95,54 @@ func (s *Service) repoForTracker(project domain.ProjectRecord, fallbackProvider 
 // For GitHub, the host is always "" — GitHub tracker IDs don't use Host.
 // For GitLab, "gitlab.com" and "www.gitlab.com" normalize to "" (the zero
 // value meaning gitlab.com) so that callers don't need to special-case the
-// default host. Self-managed hosts pass through unchanged.
+// default host. Self-managed hosts pass through unchanged. For Forgejo, every
+// instance is self-hosted, so the host is passed through unchanged (no default
+// public host to collapse to "").
 func normalizeTrackerHost(provider, host string) string {
-	if provider != string(domain.TrackerProviderGitLab) {
+	if provider != string(domain.TrackerProviderGitLab) && provider != string(domain.TrackerProviderForgejo) {
 		return ""
 	}
 	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "gitlab.com" || host == "www.gitlab.com" {
+	if provider == string(domain.TrackerProviderGitLab) && (host == "gitlab.com" || host == "www.gitlab.com") {
 		return ""
 	}
 	return host
+}
+
+// isGitHubIssueHost reports whether host is a GitHub host (github.com or a
+// GitHub Enterprise host). Used to exclude GitHub issue URLs from the Forgejo
+// classifier (GitHub's /issues/N form is the same shape; only the host differs).
+func isGitHubIssueHost(host string) bool {
+	return host == "github.com" || host == "www.github.com" || host == "api.github.com" ||
+		strings.HasSuffix(host, ".github.com") || strings.HasSuffix(host, ".ghe.io")
+}
+
+// canonicalForgejoIssueURL parses a Forgejo issue URL (https://host/owner/repo/
+// issues/<iid>) into the native "owner/repo#iid" form + host. GitHub's issue
+// URL has the same shape but is restricted to github.com; GitLab's uses the
+// /-/issues/ path, so this only matches the plain /issues/ form on other hosts.
+func canonicalForgejoIssueURL(raw string) (native, host string, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", "", false
+	}
+	if isGitHubIssueHost(strings.ToLower(u.Hostname())) {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) != 4 || parts[2] != "issues" {
+		return "", "", false
+	}
+	if parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	n, err := strconv.Atoi(parts[3])
+	if err != nil || n <= 0 {
+		return "", "", false
+	}
+	// u.Host preserves the port (e.g. 127.0.0.1:3000) so a local instance
+	// matches its allowlist entry.
+	return fmt.Sprintf("%s/%s#%d", parts[0], strings.TrimSuffix(parts[1], ".git"), n), u.Host, true
 }
 
 func canonicalGitHubIssueNative(raw string) (string, bool) {

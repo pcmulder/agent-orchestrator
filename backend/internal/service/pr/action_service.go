@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -185,9 +186,17 @@ func scmRepoForPR(pr domain.PullRequest) (ports.SCMRepo, bool) {
 	if host == "" && provider == "github" {
 		host = "github.com"
 	}
+	// The API scheme is re-derived from the PR URL so a plain-HTTP self-hosted
+	// instance (e.g. a local test server) keeps its base scheme across the
+	// merge action; empty stays empty (the provider defaults to https).
+	scheme := ""
+	if u, err := url.Parse(pr.URL); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		scheme = u.Scheme
+	}
 	return ports.SCMRepo{
 		Provider: provider,
 		Host:     host,
+		Scheme:   scheme,
 		Owner:    strings.Join(parts[:len(parts)-1], "/"),
 		Name:     parts[len(parts)-1],
 		Repo:     pr.Repo,

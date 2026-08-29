@@ -86,7 +86,7 @@ func (s *Service) ClaimPR(ctx context.Context, id domain.SessionID, ref string, 
 	if project.Kind.WithDefault() == domain.ProjectKindScratch {
 		return ClaimPRResult{}, ErrSessionNotClaimable
 	}
-	prURL, number, err := normalizePRRef(ref, project.RepoOriginURL)
+	prURL, number, err := normalizePRRef(ref, project.RepoOriginURL, s.scm)
 	if err != nil {
 		return ClaimPRResult{}, err
 	}
@@ -196,11 +196,15 @@ func scmRepoForClaim(provider scmProvider, projectOrigin, prURL string) (ports.S
 	if repo, ok := provider.ParseRepository(projectOrigin); ok {
 		return repo, nil
 	}
-	host, owner, name, _, err := parsePRURL(prURL)
+	parts, err := parsePRURL(prURL)
 	if err != nil {
 		return ports.SCMRepo{}, ErrInvalidPRRef
 	}
-	return ports.SCMRepo{Provider: providerKey(host), Host: host, Owner: owner, Name: name, Repo: owner + "/" + name}, nil
+	// The origin could not be classified by the configured providers, so fall
+	// back to classifying by the PR URL's path shape (/pulls/ → forgejo, /pull/
+	// → github, /-/merge_requests/ → gitlab). This keeps a forgejo PR routed to
+	// the forgejo adapter even when no forgejo provider is configured.
+	return ports.SCMRepo{Provider: parts.provider, Host: parts.host, Scheme: parts.scheme, Owner: parts.owner, Name: parts.name, Repo: parts.owner + "/" + parts.name}, nil
 }
 
 // providerKey maps a hostname to the normalized provider key used by the
@@ -359,7 +363,7 @@ func claimedFirst(prs []domain.PRFacts, prURL string) []domain.PRFacts {
 	return prs
 }
 
-func normalizePRRef(ref, repoOrigin string) (string, int, error) {
+func normalizePRRef(ref, repoOrigin string, provider scmProvider) (string, int, error) {
 	ref = strings.TrimPrefix(strings.TrimSpace(ref), "#")
 	if ref == "" {
 		return "", 0, ErrInvalidPRRef
@@ -369,29 +373,97 @@ func normalizePRRef(ref, repoOrigin string) (string, int, error) {
 		if err != nil {
 			return "", 0, ErrInvalidPRRef
 		}
-		return prURLFromParts(host, owner, repo, n), n, nil
+		// A numeric ref needs the origin's provider. The configured SCM
+		// provider classifies it (a forgejo origin looks like any other
+		// self-hosted git remote, so host heuristics cannot tell forgejo from
+		// gitlab); fall back to the host-based default when no provider is
+		// wired or it cannot classify.
+		originProvider := providerFromOrigin(repoOrigin)
+		if provider != nil {
+			if repo, ok := provider.ParseRepository(repoOrigin); ok && repo.Provider != "" {
+				originProvider = repo.Provider
+			}
+		}
+		return prURLFromParts(host, owner, repo, n, originProvider, schemeOfRaw(repoOrigin)), n, nil
 	}
-	host, owner, repo, n, err := parsePRURL(ref)
-	if err != nil || host == "" || owner == "" || repo == "" || n <= 0 {
+	parts, err := parsePRURL(ref)
+	if err != nil || parts.host == "" || parts.owner == "" || parts.name == "" || parts.number <= 0 {
 		return "", 0, ErrInvalidPRRef
 	}
-	return prURLFromParts(host, owner, repo, n), n, nil
+	// The ref is a full PR URL: its path shape is authoritative for the
+	// provider (parsePRURL classifies /pulls/ → forgejo, /pull/ → github,
+	// /-/merge_requests/ → gitlab and rejects unrecognized shapes).
+	return prURLFromParts(parts.host, parts.owner, parts.name, parts.number, parts.provider, parts.scheme), parts.number, nil
 }
 
-// prURLFromParts constructs the canonical PR/MR URL for a provider.
-// GitHub uses /pull/N; GitLab uses /-/merge_requests/N.
-func prURLFromParts(host, owner, repo string, number int) string {
-	if providerKey(host) == "github" {
-		return fmt.Sprintf("https://%s/%s/%s/pull/%d", host, owner, repo, number)
+// providerFromOrigin classifies the provider of a project origin URL by host.
+// github.com hosts are github; every other host is treated as gitlab (the
+// pre-forgejo behavior). Forgejo is distinguished by PR URL shape (see
+// parsePRURL), not by origin host, because a forgejo origin looks like any
+// other self-hosted git remote. When the origin cannot be classified
+// (empty), gitlab is the safe default so a numeric ref still resolves.
+func providerFromOrigin(repoOrigin string) string {
+	host := hostFromRaw(repoOrigin)
+	if host == "" {
+		return "gitlab"
 	}
-	return fmt.Sprintf("https://%s/%s/%s/-/merge_requests/%d", host, owner, repo, number)
+	host = strings.ToLower(host)
+	if host == "github.com" || host == "www.github.com" || host == "api.github.com" ||
+		strings.HasSuffix(host, ".github.com") || strings.HasSuffix(host, ".ghe.io") {
+		return "github"
+	}
+	return "gitlab"
+}
+
+// hostFromRaw extracts the host from a git origin URL (https/ssh).
+func hostFromRaw(raw string) string {
+	if strings.HasPrefix(raw, "git@") {
+		rest := strings.TrimPrefix(raw, "git@")
+		colonIdx := strings.Index(rest, ":")
+		if colonIdx < 0 {
+			return ""
+		}
+		return rest[:colonIdx]
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// prURLFromParts constructs the canonical PR/MR URL for a provider and scheme.
+// GitHub uses /pull/N; GitLab uses /-/merge_requests/N; Forgejo uses /pulls/N.
+// The scheme (http/https) is preserved so a plain-HTTP self-hosted instance
+// keeps its URL scheme in the persisted/claimed PR URL, which downstream code
+// uses to derive the provider's API base scheme.
+func prURLFromParts(host, owner, repo string, number int, provider, scheme string) string {
+	if scheme != "http" && scheme != "https" {
+		scheme = "https"
+	}
+	switch provider {
+	case "github":
+		return fmt.Sprintf("%s://%s/%s/%s/pull/%d", scheme, host, owner, repo, number)
+	case "forgejo":
+		return fmt.Sprintf("%s://%s/%s/%s/pulls/%d", scheme, host, owner, repo, number)
+	default:
+		return fmt.Sprintf("%s://%s/%s/%s/-/merge_requests/%d", scheme, host, owner, repo, number)
+	}
+}
+
+// schemeOfRaw returns the http(s) scheme of a raw URL, or "" when absent.
+func schemeOfRaw(raw string) string {
+	if u, err := url.Parse(raw); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		return u.Scheme
+	}
+	return ""
 }
 
 func requireSameRepo(prURL, repoOrigin string) error {
 	if strings.TrimSpace(repoOrigin) == "" {
 		return nil
 	}
-	prHost, prOwner, prRepo, _, err := parsePRURL(prURL)
+	parts, err := parsePRURL(prURL)
 	if err != nil {
 		return ErrInvalidPRRef
 	}
@@ -403,53 +475,82 @@ func requireSameRepo(prURL, repoOrigin string) error {
 	// owner/repo name on GitHub and GitLab must not validate, and a
 	// gitlab.com origin must not accept a self-managed GitLab MR (review
 	// finding #6).
-	if !strings.EqualFold(prHost, originHost) {
+	if !strings.EqualFold(parts.host, originHost) {
 		return ErrProjectMismatch
 	}
-	if !strings.EqualFold(prOwner, originOwner) || !strings.EqualFold(prRepo, originRepo) {
+	if !strings.EqualFold(parts.owner, originOwner) || !strings.EqualFold(parts.name, originRepo) {
 		return ErrProjectMismatch
 	}
 	return nil
 }
 
-func parsePRURL(raw string) (host, owner, name string, number int, err error) {
+// prURLParts is the parsed form of a PR/MR URL.
+type prURLParts struct {
+	host     string
+	owner    string
+	name     string
+	number   int
+	scheme   string
+	provider string
+}
+
+// parsePRURL parses a PR/MR URL into its parts, classifying the provider by
+// path shape: /pulls/N → forgejo (checked before the GitHub singular form),
+// /pull/N → github, /-/merge_requests/N → gitlab. The host preserves any port
+// (e.g. 127.0.0.1:3000) so a self-hosted/plain-HTTP instance matches its
+// allowlist and builds the correct API base.
+func parsePRURL(raw string) (prURLParts, error) {
+	var out prURLParts
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", "", "", 0, err
+		return out, err
 	}
-	if !strings.EqualFold(u.Scheme, "https") {
-		return "", "", "", 0, ErrInvalidPRRef
+	if !strings.EqualFold(u.Scheme, "https") && !strings.EqualFold(u.Scheme, "http") {
+		return out, ErrInvalidPRRef
 	}
-	host = u.Hostname()
+	out.scheme = strings.ToLower(u.Scheme)
+	out.host = u.Host
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+
+	// Forgejo: /owner/repo/pulls/N → 4 parts, parts[2] == "pulls" (PLURAL —
+	// checked BEFORE the GitHub /pull/ form so the two never collide).
+	if len(parts) == 4 && parts[2] == "pulls" {
+		n, parseErr := strconv.Atoi(parts[3])
+		if parseErr != nil || n <= 0 {
+			return out, ErrInvalidPRRef
+		}
+		out.owner, out.name, out.number, out.provider = parts[0], strings.TrimSuffix(parts[1], ".git"), n, "forgejo"
+		return out, nil
+	}
 
 	// GitHub: /owner/repo/pull/N → 4 parts, parts[2] == "pull"
 	if len(parts) == 4 && parts[2] == "pull" {
 		n, parseErr := strconv.Atoi(parts[3])
 		if parseErr != nil || n <= 0 {
-			return "", "", "", 0, ErrInvalidPRRef
+			return out, ErrInvalidPRRef
 		}
-		return host, parts[0], strings.TrimSuffix(parts[1], ".git"), n, nil
+		out.owner, out.name, out.number, out.provider = parts[0], strings.TrimSuffix(parts[1], ".git"), n, "github"
+		return out, nil
 	}
 
-	// GitLab: /owner/repo/-/merge_requests/N → parts[2] == "-", parts[3] == "merge_requests"
+	// GitLab: /owner/repo/-/merge_requests/N
 	// Supports nested groups: /group/subgroup/repo/-/merge_requests/N
 	if len(parts) >= 5 && parts[len(parts)-2] == "merge_requests" && parts[len(parts)-3] == "-" {
 		n, parseErr := strconv.Atoi(parts[len(parts)-1])
 		if parseErr != nil || n <= 0 {
-			return "", "", "", 0, ErrInvalidPRRef
+			return out, ErrInvalidPRRef
 		}
-		// owner = everything before "-"; name = the last segment before "-"
 		repoParts := parts[:len(parts)-3]
 		if len(repoParts) < 2 {
-			return "", "", "", 0, ErrInvalidPRRef
+			return out, ErrInvalidPRRef
 		}
-		owner = strings.Join(repoParts[:len(repoParts)-1], "/")
-		name = strings.TrimSuffix(repoParts[len(repoParts)-1], ".git")
-		return host, owner, name, n, nil
+		out.owner = strings.Join(repoParts[:len(repoParts)-1], "/")
+		out.name = strings.TrimSuffix(repoParts[len(repoParts)-1], ".git")
+		out.number, out.provider = n, "gitlab"
+		return out, nil
 	}
 
-	return "", "", "", 0, ErrInvalidPRRef
+	return out, ErrInvalidPRRef
 }
 
 func repoFromURL(raw string) (host, owner, name string, err error) {
@@ -482,7 +583,10 @@ func repoFromURL(raw string) (host, owner, name string, err error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	host = u.Hostname()
+	// u.Host preserves any port (e.g. gitlab.internal:8443 or 127.0.0.1:3000)
+	// so self-managed and local instances match their allowlist entries and
+	// build the correct API base.
+	host = u.Host
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) < 2 {
 		return "", "", "", ErrInvalidPRRef

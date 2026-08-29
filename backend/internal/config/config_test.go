@@ -456,3 +456,124 @@ func TestLoadGitLabInvalidHostTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadForgejoDefaults(t *testing.T) {
+	// Clear the Forgejo config vars so we observe pure defaults.
+	for _, k := range []string{"AO_FORGEJO_ALLOWED_HOSTS", "AO_FORGEJO_HOST_TOKENS"} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Forgejo.AllowedHosts != nil {
+		t.Errorf("Forgejo.AllowedHosts = %v, want nil", cfg.Forgejo.AllowedHosts)
+	}
+	if cfg.Forgejo.HostTokens != nil {
+		t.Errorf("Forgejo.HostTokens = %v, want nil", cfg.Forgejo.HostTokens)
+	}
+}
+
+func TestLoadForgejoAllowedHosts(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{"single host", "forgejo.example.com", []string{"forgejo.example.com"}},
+		{"comma-separated", "forgejo.example.com,forgejo.internal", []string{"forgejo.example.com", "forgejo.internal"}},
+		{"trimmed whitespace", " forgejo.example.com , forgejo.internal ", []string{"forgejo.example.com", "forgejo.internal"}},
+		{"empty entries skipped", "forgejo.example.com,,forgejo.internal,", []string{"forgejo.example.com", "forgejo.internal"}},
+		{"with port", "forgejo.internal:3000", []string{"forgejo.internal:3000"}},
+		{"localhost with port", "127.0.0.1:3000", []string{"127.0.0.1:3000"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AO_FORGEJO_ALLOWED_HOSTS", tc.env)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.Forgejo.AllowedHosts) != len(tc.want) {
+				t.Fatalf("AllowedHosts = %v, want %v", cfg.Forgejo.AllowedHosts, tc.want)
+			}
+			for i, h := range tc.want {
+				if cfg.Forgejo.AllowedHosts[i] != h {
+					t.Errorf("AllowedHosts[%d] = %q, want %q", i, cfg.Forgejo.AllowedHosts[i], h)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadForgejoHostTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want map[string]string
+	}{
+		{
+			name: "single host=token",
+			env:  "forgejo.example.com=token-1",
+			want: map[string]string{"forgejo.example.com": "token-1"},
+		},
+		{
+			name: "multiple host=token pairs",
+			env:  "forgejo.example.com=token-1,forgejo.internal=token-2",
+			want: map[string]string{
+				"forgejo.example.com": "token-1",
+				"forgejo.internal":    "token-2",
+			},
+		},
+		{
+			name: "host with port",
+			env:  "127.0.0.1:3000=local-token",
+			want: map[string]string{"127.0.0.1:3000": "local-token"},
+		},
+		{
+			name: "entry without equals skipped",
+			env:  "forgejo.example.com=token-1,not-a-pair",
+			want: map[string]string{"forgejo.example.com": "token-1"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AO_FORGEJO_HOST_TOKENS", tc.env)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.Forgejo.HostTokens) != len(tc.want) {
+				t.Fatalf("HostTokens = %v, want %v", cfg.Forgejo.HostTokens, tc.want)
+			}
+			for k, v := range tc.want {
+				got, ok := cfg.Forgejo.HostTokens[k]
+				if !ok {
+					t.Errorf("HostTokens missing key %q", k)
+					continue
+				}
+				if got != v {
+					t.Errorf("HostTokens[%q] = %q, want %q", k, got, v)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadForgejoInvalidHostTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+	}{
+		{"token contains equals", "forgejo.example.com=token=with=equals"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AO_FORGEJO_HOST_TOKENS", tc.env)
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() = nil error, want error for malformed AO_FORGEJO_HOST_TOKENS")
+			}
+		})
+	}
+}

@@ -8468,6 +8468,7 @@ components:
           enum:
           - github
           - gitlab
+          - forgejo
           type: string
         repo:
           type: string
@@ -8942,6 +8943,7 @@ components:
           enum:
           - github
           - gitlab
+          - forgejo
           type: string
       required:
       - projectId
@@ -9158,6 +9160,7 @@ components:
           enum:
           - github
           - gitlab
+          - forgejo
           type: string
         repo:
           type: string

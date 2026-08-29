@@ -265,12 +265,15 @@ func reviewerReviewedPR(ctx context.Context, store Store, prURL, reviewer string
 }
 
 func reviewRequestRef(pr domain.PullRequest) (ports.SCMPRRef, error) {
-	repo := ports.SCMRepo{Provider: pr.Provider, Host: pr.Host, Repo: pr.Repo}
+	repo := ports.SCMRepo{Provider: pr.Provider, Host: pr.Host, Repo: pr.Repo, Scheme: schemeFromURL(pr.URL)}
 	if repo.Provider == "" {
 		repo.Provider = providerFromPRURL(pr.URL)
 	}
 	if repo.Host == "" {
 		repo.Host = hostFromPRURL(pr.URL)
+	}
+	if repo.Scheme == "" {
+		repo.Scheme = schemeFromURL(pr.URL)
 	}
 	if repo.Repo != "" {
 		parts := strings.SplitN(repo.Repo, "/", 2)
@@ -296,8 +299,35 @@ func providerFromPRURL(raw string) string {
 	if strings.Contains(raw, "/-/merge_requests/") {
 		return "gitlab"
 	}
+	// Forgejo uses /pulls/N (plural); GitHub uses /pull/N. The plural form is
+	// checked first so it never collides with the singular GitHub path.
+	if isForgejoPRURL(raw) {
+		return "forgejo"
+	}
 	if strings.Contains(raw, "/pull/") {
 		return "github"
+	}
+	return ""
+}
+
+// isForgejoPRURL reports whether raw is a forgejo PR URL of the form
+// /owner/repo/pulls/N. A trailing /pull/N (GitHub) is not a forgejo URL.
+func isForgejoPRURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	return len(parts) == 4 && parts[2] == "pulls"
+}
+
+func schemeFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		return u.Scheme
 	}
 	return ""
 }
