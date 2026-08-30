@@ -100,8 +100,8 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if tp == "" {
 				tp = "github"
 			}
-			if tp != "github" && tp != "gitlab" {
-				return usageError{fmt.Errorf(`--tracker-provider must be "github" or "gitlab"`)}
+			if tp != "github" && tp != "gitlab" && tp != "forgejo" {
+				return usageError{fmt.Errorf(`--tracker-provider must be "github", "gitlab", or "forgejo"`)}
 			}
 			opts.trackerProvider = tp
 
@@ -197,7 +197,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.prompt, "prompt", "", "Initial prompt for the agent")
 	f.StringVar(&opts.model, "model", "", "Agent model override for this session only (e.g. sonnet, gpt-5.6-sol); overrides project/role config without changing it")
 	f.StringVar(&opts.issue, "issue", "", "Issue id to associate with the session")
-	f.StringVar(&opts.trackerProvider, "tracker-provider", "github", "Issue tracker provider: github or gitlab (default: github)")
+	f.StringVar(&opts.trackerProvider, "tracker-provider", "github", "Issue tracker provider: github, gitlab, or forgejo (default: github)")
 	f.StringVar(&opts.name, "name", "", "Display name shown in the sidebar (required, max 20 characters)")
 	f.StringVar(&opts.claimPR, "claim-pr", "", "Immediately claim an existing PR for the spawned session")
 	f.BoolVar(&opts.noTakeover, "no-takeover", false, "Refuse if another active session owns the claimed PR (requires --claim-pr)")

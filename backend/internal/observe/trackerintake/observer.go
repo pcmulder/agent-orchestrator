@@ -363,14 +363,16 @@ func parseRepoNative(remote string, provider domain.TrackerProvider) (string, bo
 // repoHostFromOrigin extracts the host from the SCM origin URL for the given
 // provider. For GitHub the host is always "" (GitHub tracker IDs don't use
 // Host). For GitLab, "gitlab.com" and "www.gitlab.com" normalize to ""
-// (zero value = gitlab.com); self-managed hosts pass through unchanged.
+// (zero value = gitlab.com); self-managed hosts pass through unchanged. For
+// Forgejo, every instance is self-hosted, so the host is always passed
+// through unchanged (there is no default public host to collapse to "").
 func repoHostFromOrigin(remote string, provider domain.TrackerProvider) string {
-	if provider != domain.TrackerProviderGitLab {
+	if provider != domain.TrackerProviderGitLab && provider != domain.TrackerProviderForgejo {
 		return ""
 	}
 	host := hostFromRemote(remote)
 	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "gitlab.com" || host == "www.gitlab.com" {
+	if provider == domain.TrackerProviderGitLab && (host == "gitlab.com" || host == "www.gitlab.com") {
 		return ""
 	}
 	return host

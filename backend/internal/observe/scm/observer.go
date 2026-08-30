@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -751,8 +752,8 @@ func (o *Observer) discoverSubjects(ctx context.Context) (map[string]*subject, [
 				continue
 			}
 			if p.RepoOriginURL == "" && p.Path != "" {
-				if url := resolveGitOriginURL(p.Path); url != "" {
-					p.RepoOriginURL = url
+				if originURL := resolveGitOriginURL(p.Path); originURL != "" {
+					p.RepoOriginURL = originURL
 					if err := o.store.UpsertProject(ctx, p); err != nil {
 						o.logger.Warn("scm observer: backfill origin URL persist failed", "project", p.ID, "err", err)
 					}
@@ -877,7 +878,11 @@ func repoForTrackedPR(pr domain.PullRequest, repos []ports.SCMRepo) (ports.SCMRe
 		if !ok || owner == "" || name == "" {
 			return ports.SCMRepo{}, false
 		}
-		return ports.SCMRepo{Provider: pr.Provider, Host: pr.Host, Owner: owner, Name: name, Repo: pr.Repo}, true
+		// The scheme is re-derived from the PR URL (durable state) so a plain-
+		// HTTP self-hosted instance (e.g. a local test server) keeps its API
+		// base scheme across polls, which the provider derives from the git
+		// remote only at discovery time.
+		return ports.SCMRepo{Provider: pr.Provider, Host: pr.Host, Scheme: schemeFromURL(pr.URL), Owner: owner, Name: name, Repo: pr.Repo}, true
 	}
 	if pr.Repo != "" {
 		for _, repo := range repos {
@@ -898,6 +903,7 @@ func repoForTrackedPR(pr domain.PullRequest, repos []ports.SCMRepo) (ports.SCMRe
 	return repos[0], len(repos) > 0
 }
 
+// matchesTrackedPRRepo reports whether pr's identity matches repo.
 func matchesTrackedPRRepo(pr domain.PullRequest, repo ports.SCMRepo) bool {
 	if pr.Provider != "" && !strings.EqualFold(pr.Provider, repo.Provider) {
 		return false
@@ -909,6 +915,20 @@ func matchesTrackedPRRepo(pr domain.PullRequest, repo ports.SCMRepo) bool {
 		return false
 	}
 	return true
+}
+
+// schemeFromURL returns the http(s) scheme of a URL, or "" when it cannot be
+// parsed or the scheme is not http(s). Used to carry a self-hosted provider's
+// API scheme (plain-HTTP instances) through provider-neutral repos.
+func schemeFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		return u.Scheme
+	}
+	return ""
 }
 
 func openTrackedPRs(prs []domain.PullRequest) []domain.PullRequest {

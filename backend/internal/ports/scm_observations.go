@@ -22,6 +22,13 @@ type SCMRepo struct {
 	Provider string
 	// Host is the SCM host, e.g. "github.com" or a GitHub Enterprise host.
 	Host string
+	// Scheme is the API URL scheme ("http" or "https") the provider should use
+	// when talking to this host. It is populated from the git remote URL by
+	// ParseRepository so self-hosted providers reachable over plain HTTP
+	// (e.g. a local test instance at 127.0.0.1:3000) are addressed with the
+	// correct scheme. Empty means "https" for providers that need a scheme.
+	// Providers with a fixed public endpoint (GitHub, GitLab) ignore it.
+	Scheme string
 	// Owner is the provider-specific namespace/organization/user.
 	Owner string
 	// Name is the repository name without the owner namespace.

@@ -31,6 +31,7 @@ equivalent; this doc does not duplicate them.
 graph TB
     subgraph Providers
         GH[adapters/scm/github]
+        FJ[adapters/scm/forgejo]
         GL[adapters/scm/gitlab]
         Multi[adapters/scm/multi<br/>per-provider dispatch]
     end
@@ -48,6 +49,7 @@ graph TB
     end
     ClaimPath[service/session/claim_pr.go<br/>ao session claim-pr] --> PRStore
     GH --> Multi
+    FJ --> Multi
     GL --> Multi
     Multi --> Poll
     Poll --> PRStore
@@ -64,6 +66,48 @@ static tokens from config.
 The observer is deliberately provider-neutral: it never speaks REST/GraphQL
 itself. Everything it knows arrives as `ports.SCMObservation` /
 `ports.SCMPRRef` / guard results through the `ports` interfaces.
+
+## Supported Providers & Configuration
+
+Three providers are registered with the multi dispatcher, in this order:
+**GitHub**, **Forgejo**, **GitLab**. Each sub-provider only accepts hosts in
+its own allowlist, so a remote is claimed by the first provider whose host it
+matches (the order matters only when a single host is allowlisted for more
+than one provider).
+
+### GitHub
+
+| Variable | Purpose |
+|---|---|
+| `AO_GITHUB_TOKEN` / `GITHUB_TOKEN` | GitHub token (falls back to `gh auth token`). |
+
+No host allowlist — GitHub is a fixed public host.
+
+### GitLab
+
+| Variable | Purpose |
+|---|---|
+| `AO_GITLAB_TOKEN` / `GITLAB_TOKEN` | Default token (falls back to `glab auth status --show-token`). |
+| `AO_GITLAB_ALLOWED_HOSTS` | Comma-separated self-managed GitLab hosts (each may include `:port`). `gitlab.com` is always allowed. |
+| `AO_GITLAB_HOST_TOKENS` | `host=token,host=token` per-host token overrides. |
+
+### Forgejo (Gitea-compatible)
+
+Forgejo is fully self-hosted — there is **no default public host**, so every
+host must appear in `AO_FORGEJO_ALLOWED_HOSTS`. The API base follows the git
+remote's scheme, so a plain-HTTP instance (e.g. a local test server at
+`127.0.0.1:3000`) is addressed with `http://`, not `https://`.
+
+| Variable | Purpose |
+|---|---|
+| `AO_FORGEJO_TOKEN` / `FORGEJO_TOKEN` | Default token. |
+| `AO_FORGEJO_ALLOWED_HOSTS` | Comma-separated Forgejo hosts (each may include `:port`). Every host must be listed. |
+| `AO_FORGEJO_HOST_TOKENS` | `host=token,host=token` per-host token overrides. |
+
+Forgejo PRs live at `/owner/repo/pulls/N` (plural), which the CLI, claim, and
+review services classify by URL shape (checked before GitHub's singular
+`/pull/N`). The issue tracker uses the same host allowlist; `--tracker-provider
+forgejo` selects it explicitly.
 
 ## How PR Facts Enter the System
 

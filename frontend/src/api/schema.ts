@@ -2941,7 +2941,7 @@ export interface components {
             /** Format: date-time */
             observedAt?: string;
             /** @enum {string} */
-            provider: "github" | "gitlab";
+            provider: "github" | "gitlab" | "forgejo";
             repo: string;
             review: components["schemas"]["SessionPRReviewSummary"];
             /** Format: date-time */
@@ -3119,7 +3119,7 @@ export interface components {
             projectId: string;
             prompt?: string;
             /** @enum {string} */
-            trackerProvider?: "github" | "gitlab";
+            trackerProvider?: "github" | "gitlab" | "forgejo";
         };
         SpawnSessionResponse: {
             promptBytes: number;
@@ -3220,7 +3220,7 @@ export interface components {
             assignee?: string;
             enabled?: boolean;
             /** @enum {string} */
-            provider?: "github" | "gitlab";
+            provider?: "github" | "gitlab" | "forgejo";
             repo?: string;
         };
         TriggerReviewRequest: {

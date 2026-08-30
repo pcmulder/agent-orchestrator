@@ -43,7 +43,7 @@ func TestSCMWiring_MultiProviderSatisfiesScopedIdentityResolver(t *testing.T) {
 // newMultiSCMProvider helper (used outside the observer) also returns a value
 // that satisfies ScopedIdentityResolver.
 func TestSCMWiring_NewMultiSCMProviderReturnsScopedResolver(t *testing.T) {
-	multi := newMultiSCMProvider(testGitLabConfig(), slog.Default())
+	multi := newMultiSCMProvider(testGitLabConfig(), config.ForgejoConfig{}, slog.Default())
 	if multi == nil {
 		t.Skip("no SCM provider available (missing tokens)")
 	}
