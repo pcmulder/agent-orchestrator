@@ -363,6 +363,48 @@ func TestListPRsByRepo(t *testing.T) {
 	}
 }
 
+// TestListPRsByRepoSurfacesMergedPR verifies that a PR that has been merged
+// externally (state=closed, merged=true, merge_commit_sha set) is surfaced by
+// ListPRsByRepo as merged. Forgejo lists with state=all (matching GitLab) so
+// terminal PRs are observed by the normal refresh path instead of being
+// dropped (BUG B).
+func TestListPRsByRepoSurfacesMergedPR(t *testing.T) {
+	_, p, host, scheme := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/repos/acme/repo/pulls" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		// The listing must request all states so merged PRs are included.
+		if r.URL.Query().Get("state") != "all" {
+			t.Errorf("list state = %q, want all", r.URL.Query().Get("state"))
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id": 103, "number": 9, "title": "Merged PR", "state": "closed", "draft": false,
+				"html_url": "http://" + r.Host + "/acme/repo/pulls/9", "mergeable": false, "merged": true,
+				"merge_commit_sha": "msha",
+				"head":             map[string]any{"ref": "feat/m", "sha": "h3", "repo": map[string]any{"full_name": "acme/repo"}},
+				"base":             map[string]any{"ref": "main", "sha": "b2", "repo": map[string]any{"full_name": "acme/repo"}},
+				"user":             map[string]any{"login": "alice"},
+				"merged_at":        "2026-08-30T07:01:20Z",
+			},
+		})
+	}))
+	prs, err := p.ListPRsByRepo(ctx(), testRepo(host, scheme), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("len = %d, want 1 (merged PR must be listed under state=all)", len(prs))
+	}
+	pr := prs[0]
+	if !pr.Merged || pr.State != string(domain.PRStateMerged) {
+		t.Fatalf("merged PR not surfaced as merged: %+v", pr)
+	}
+	if pr.MergeCommitSHA != "msha" {
+		t.Fatalf("MergeCommitSHA = %q, want msha", pr.MergeCommitSHA)
+	}
+}
+
 func TestListPRsByRepoDraftAndForkHeadRepo(t *testing.T) {
 	_, p, host, scheme := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
@@ -597,6 +639,11 @@ func TestFetchReviewThreads(t *testing.T) {
 // Identity / credentials
 // ---------------------------------------------------------------------------
 
+// TestAuthenticatedIdentityForHost verifies that AuthenticatedIdentityForHost
+// resolves the identity for an allowlisted host. The test server is plain
+// HTTP at 127.0.0.1, and the probe only succeeds when the client's API base
+// uses the remote's http scheme — with the https default the request would
+// fail with "server gave HTTP response to HTTPS client" (BUG A).
 func TestAuthenticatedIdentityForHost(t *testing.T) {
 	_, p, host, scheme := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/user" {
@@ -604,18 +651,89 @@ func TestAuthenticatedIdentityForHost(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"login": "octo", "is_admin": false})
 	}))
-	ident, err := p.AuthenticatedIdentityForHost(ctx(), host)
+	ident, err := p.AuthenticatedIdentityForHost(ctx(), host, scheme)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("identity over plain HTTP (scheme=%q) = %v; the probe must stay http", scheme, err)
 	}
 	if ident.Login != "octo" || !ident.Human {
 		t.Fatalf("identity = %+v", ident)
 	}
 	// Second call is cached (no extra assertion; just ensure no error).
-	if _, err := p.AuthenticatedIdentityForHost(ctx(), host); err != nil {
+	if _, err := p.AuthenticatedIdentityForHost(ctx(), host, scheme); err != nil {
 		t.Fatal(err)
 	}
-	_ = scheme
+}
+
+// TestAuthenticatedIdentityForHost_PlainHTTPRemoteStaysHTTP proves the scheme
+// is actually plumbed into client selection (not just accepted): a provider
+// with no pre-matched default client must lazily create an http:// client for
+// a plain-HTTP remote and fail on an https:// client — the exact BUG A
+// symptom observed against a live plain-HTTP Forgejo.
+func TestAuthenticatedIdentityForHost_PlainHTTPRemoteStaysHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"login": "ao-admin", "is_admin": true})
+	}))
+	t.Cleanup(srv.Close)
+	u, _ := url.Parse(srv.URL)
+	host := u.Host
+	// No default client: per-host clients are derived purely from host+scheme.
+	p, err := NewProvider(ProviderOptions{
+		Token:              StaticTokenSource("test-token"),
+		SkipTokenPreflight: true,
+		AllowedHosts:       []string{host},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// http scheme (the plain-HTTP remote): the probe reaches the server and
+	// resolves the login.
+	ident, err := p.AuthenticatedIdentityForHost(ctx(), host, "http")
+	if err != nil {
+		t.Fatalf("http-scheme identity = %v; the plain-HTTP remote must be probed over http", err)
+	}
+	if ident.Login != "ao-admin" {
+		t.Fatalf("login = %q, want ao-admin", ident.Login)
+	}
+
+	// https scheme for the same host is a DISTINCT cache entry and must FAIL
+	// against the plain-HTTP server with the BUG A signature — proving the
+	// scheme (not just the host) drives client selection and caching.
+	if _, err := p.AuthenticatedIdentityForHost(ctx(), host, "https"); err == nil {
+		t.Fatal("https-scheme identity succeeded against a plain-HTTP server; scheme must select the API base")
+	} else if !strings.Contains(err.Error(), "server gave HTTP response to HTTPS client") {
+		t.Fatalf("https-scheme identity err = %v, want the plain-HTTP/https mismatch signature", err)
+	}
+}
+
+// TestAuthenticatedIdentityForHost_SchemeSelectsClient verifies that the
+// identity probe's client selection honors the remote's scheme (http stays
+// http, https stays https) instead of always defaulting to https — the
+// scheme is part of both the client key and the identity cache key, so a
+// plain-HTTP instance is never probed over https (BUG A).
+func TestAuthenticatedIdentityForHost_SchemeSelectsClient(t *testing.T) {
+	_, p, host, _ := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"login": "octo"})
+	}))
+	httpClient := p.clientForHost(host, "http")
+	if httpClient == nil {
+		t.Fatal("http-scheme host not in allowlist")
+	}
+	if !strings.HasPrefix(httpClient.apiBaseURL(), "http://") {
+		t.Fatalf("http-scheme API base = %q, want http:// prefix (plain-HTTP instance must stay http)", httpClient.apiBaseURL())
+	}
+	httpsClient := p.clientForHost(host, "https")
+	if httpsClient == nil {
+		t.Fatal("https-scheme host not in allowlist")
+	}
+	if !strings.HasPrefix(httpsClient.apiBaseURL(), "https://") {
+		t.Fatalf("https-scheme API base = %q, want https:// prefix", httpsClient.apiBaseURL())
+	}
+	// The two clients must be distinct: the scheme is part of the client key,
+	// so the identity cache (keyed by host+scheme) cannot conflate the two.
+	if httpClient == httpsClient {
+		t.Fatal("http and https clients for the same host must be distinct")
+	}
 }
 
 func TestSCMCredentialsAvailable(t *testing.T) {

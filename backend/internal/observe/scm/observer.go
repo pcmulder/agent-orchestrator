@@ -51,13 +51,16 @@ const (
 
 // identityKey builds the cache key for a per-provider, per-host identity.
 // GitHub repos carry Host="github.com" but GitHub identity is not
-// host-scoped, so all GitHub hosts collapse to the same key. GitLab repos
-// on self-managed hosts get a distinct key from gitlab.com.
-func identityKey(provider, host string) string {
+// host-scoped, so all GitHub hosts collapse to the same key. Self-managed
+// hosts (GitLab, Forgejo) get a distinct key per host; scheme-aware
+// providers (Forgejo) include the API scheme so a plain-HTTP instance on
+// port X resolves identity against its http:// API base rather than the
+// https default.
+func identityKey(provider, host, scheme string) string {
 	if provider == "github" {
 		return provider // GitHub identity is not host-scoped
 	}
-	return provider + "|" + host
+	return provider + "|" + host + "|" + strings.ToLower(strings.TrimSpace(scheme))
 }
 
 // Provider is the normalized SCM provider contract used by the observer.
@@ -426,16 +429,17 @@ func (o *Observer) Poll(ctx context.Context) error {
 	}
 
 	selection := o.selectRefreshCandidates(ctx, subjects, repoGuards, listedPRs, markRepoRefreshFailed, now)
-	// Item 2 — terminal-state reconciliation for GitHub: tracked open PRs
-	// not in the current state=open listing may have transitioned to
-	// merged/closed. Run a reconciliation pass that issues a full detail
-	// fetch per reconciled PR so terminal transitions are not permanently
-	// missed. The pass runs only when the repo-list guard is not a 304,
-	// and only for GitHub (asymmetry — see reconcileTerminalGitHubPRs).
+	// Item 2 — terminal-state reconciliation for providers whose listings drop
+	// terminal PRs (GitHub, Forgejo): tracked open PRs not in the current
+	// listing may have transitioned to merged/closed. Run a reconciliation
+	// pass that issues a full detail fetch per reconciled PR so terminal
+	// transitions are not permanently missed. The pass runs only when the
+	// repo-list guard is not a 304 (asymmetry with GitLab — see
+	// reconcileTerminalPRs).
 	// Terminal observations are routed through the normal persistence path;
 	// "still open" results are no-op persists that mark the repo
 	// refresh-incomplete so the ETag/cursor do not advance.
-	reconciledObs := o.reconcileTerminalGitHubPRs(ctx, subjects, repoGuards, listedPRs, &selection, now, markRepoRefreshFailed)
+	reconciledObs := o.reconcileTerminalPRs(ctx, subjects, repoGuards, listedPRs, &selection, now, markRepoRefreshFailed)
 	observations := map[string]ports.SCMObservation{}
 	for key, obs := range reconciledObs {
 		observations[key] = obs
@@ -1083,7 +1087,7 @@ func (o *Observer) discoverNewPRs(ctx context.Context, sessionRepos []sessionRep
 				continue
 			}
 			if identityKnown {
-				id, ok := identities[identityKey(repo.Provider, repo.Host)]
+				id, ok := identities[identityKey(repo.Provider, repo.Host, repo.Scheme)]
 				if !ok {
 					id, ok = identities[fallbackIdentityKey] // fallback single-identity
 				}
@@ -1178,8 +1182,9 @@ func (o *Observer) authenticatedIdentity(ctx context.Context) (ports.SCMIdentity
 // resolveIdentities resolves the authenticated identity for each provider key
 // present in sessionRepos. When a ScopedIdentityResolver is wired, identities
 // are resolved upfront (one call per unique provider+host pair) and cached in
-// a map keyed by identityKey(provider, host). This ensures a self-managed
-// GitLab host gets its own identity, distinct from gitlab.com. If identity
+// a map keyed by identityKey(provider, host, scheme). This ensures a self-managed
+// GitLab host gets its own identity, distinct from gitlab.com, and a plain-HTTP
+// Forgejo instance resolves identity against its http:// API base. If identity
 // resolution fails for one provider+host, PRs from that provider+host fall
 // back to branch-based discovery while other providers continue normally.
 // When no ScopedIdentityResolver is available, it falls back to the
@@ -1190,12 +1195,12 @@ func (o *Observer) resolveIdentities(ctx context.Context, sessionRepos []session
 		identities := make(map[string]ports.SCMIdentity)
 		anyKnown := false
 		for _, sr := range sessionRepos {
-			ik := identityKey(sr.repo.Provider, sr.repo.Host)
+			ik := identityKey(sr.repo.Provider, sr.repo.Host, sr.repo.Scheme)
 			if seen[ik] {
 				continue
 			}
 			seen[ik] = true
-			id, err := o.scopedIdentityResolver.AuthenticatedIdentityForProvider(ctx, sr.repo.Provider, sr.repo.Host)
+			id, err := o.scopedIdentityResolver.AuthenticatedIdentityForProvider(ctx, sr.repo.Provider, sr.repo.Host, sr.repo.Scheme)
 			if err != nil {
 				o.logger.Debug("scm observer: per-provider identity unavailable; preserving branch-based discovery for provider", "provider", sr.repo.Provider, "host", sr.repo.Host, "err", err)
 				continue
@@ -1359,15 +1364,16 @@ func (o *Observer) selectRefreshCandidates(ctx context.Context, subjects map[str
 	return selection
 }
 
-// reconcileTerminalGitHubPRs (Item 2) runs a terminal-state reconciliation
-// pass for tracked open GitHub PRs that are not in the current state=open
-// listing. Such PRs may have transitioned to merged/closed, which GitHub's
-// state=open listing permanently drops before their terminal state can be
-// observed by the normal refresh path. The pass issues a full detail fetch per
-// reconciled PR and routes the result through the normal observation/persistence
-// machinery.
+// reconcileTerminalPRs (Item 2) runs a terminal-state reconciliation pass for
+// tracked open PRs that are not in the current repo listing. A PR that
+// transitions to merged/closed after its head SHA stopped changing would
+// otherwise never be re-fetched (its commit-check guard stays 304 and it can
+// be absent from the refresh set), its row would stay open forever, and
+// terminate_on_pr_merge would never fire. The pass issues a full detail fetch
+// per reconciled PR and routes the result through the normal
+// observation/persistence machinery.
 //
-// The pass runs on every poll where the GitHub repo-list guard is NOT a 304
+// The pass runs on every poll where the repo-list guard is NOT a 304
 // (i.e. the listing changed). A "still open" detail result is a no-op
 // persistence: the observation is returned but the repository is marked
 // refresh-incomplete so the repo ETag and sync cursor do not advance (cross-
@@ -1379,18 +1385,15 @@ func (o *Observer) selectRefreshCandidates(ctx context.Context, subjects map[str
 // PR count, which is small in AO's use case (sessions track the PRs they
 // spawned).
 //
-// ASYMMETRY — this pass is GitHub-only by deliberate design:
-//   - GitHub uses state=open on ListPRsByRepo and RepoPRListGuard, so terminal
-//     PRs disappear from the listing before their detail can be refreshed.
-//     The reviewer asked for tracked-PR terminal reconciliation on GitHub
-//     (review Item 2), which state=open requires.
-//   - GitLab uses state=all on ListPRsByRepo (approved from the first review,
-//     unchanged), so merged/closed MRs remain in the listing and are observed
-//     by the normal refresh path. No reconciliation pass is needed for GitLab.
-//
-// The two providers match what the reviewer requested for each; they are not
-// aligned to a single listing strategy.
-func (o *Observer) reconcileTerminalGitHubPRs(ctx context.Context, subjects map[string]*subject, guards map[string]repoGuardState, listedPRs map[string]bool, selection *refreshSelection, now time.Time, markRepoFailed func(ports.SCMRepo)) map[string]ports.SCMObservation {
+// The pass is provider-neutral: it reconciles any tracked open PR missing
+// from the listing (GitHub, which lists state=open and permanently drops
+// terminal PRs, and Forgejo, whose listing ignores updated_after). GitLab is
+// skipped because it lists state=all on both its guard and list, so its PRs
+// never fall out of the listing and the normal refresh path observes their
+// terminal transitions. Keeping the pass provider-neutral means it also stays
+// correct as a safety net if a provider's list ever lags a transition without
+// flipping the fingerprint guard.
+func (o *Observer) reconcileTerminalPRs(ctx context.Context, subjects map[string]*subject, guards map[string]repoGuardState, listedPRs map[string]bool, selection *refreshSelection, now time.Time, markRepoFailed func(ports.SCMRepo)) map[string]ports.SCMObservation {
 	out := map[string]ports.SCMObservation{}
 	if listedPRs == nil {
 		// First poll (no cursor): listedPRs is nil, meaning the full listing
@@ -1409,9 +1412,10 @@ func (o *Observer) reconcileTerminalGitHubPRs(ctx context.Context, subjects map[
 		if !s.hasPR || s.known.Number <= 0 {
 			continue
 		}
-		// Asymmetry: only GitHub needs terminal reconciliation. GitLab uses
-		// state=all so terminal MRs never disappear from the listing.
-		if s.repo.Provider != "github" {
+		// Reconcile any provider that can drop a terminal PR from the listing
+		// (GitHub, Forgejo); skip GitLab, which lists state=all so its PRs
+		// never fall out of the listing.
+		if s.repo.Provider == "gitlab" {
 			continue
 		}
 		// Only tracked open PRs (non-terminal state in durable storage) are

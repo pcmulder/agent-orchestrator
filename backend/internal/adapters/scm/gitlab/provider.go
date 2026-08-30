@@ -235,7 +235,7 @@ func (p *Provider) clientForRepoErr(repo ports.SCMRepo) (*Client, error) {
 // classification reuses the existing isBotAuthor heuristic (project/group
 // bot username patterns, [bot] suffixes, known bot accounts).
 func (p *Provider) AuthenticatedIdentity(ctx context.Context) (ports.SCMIdentity, error) {
-	return p.AuthenticatedIdentityForHost(ctx, "")
+	return p.AuthenticatedIdentityForHost(ctx, "", "")
 }
 
 // AuthenticatedIdentityForHost resolves the account associated with the
@@ -246,7 +246,11 @@ func (p *Provider) AuthenticatedIdentity(ctx context.Context) (ports.SCMIdentity
 // API.
 //
 // A host that is neither gitlab.com nor in the allowlist returns an error.
-func (p *Provider) AuthenticatedIdentityForHost(ctx context.Context, host string) (ports.SCMIdentity, error) {
+// The scheme parameter is accepted for the host-scoped resolver contract but
+// ignored: GitLab's API base is always https (plain-HTTP self-managed GitLab
+// is a deployment choice outside this provider's scope, matching the
+// reviewer's "reject HTTPS-to-HTTP downgrades" rule).
+func (p *Provider) AuthenticatedIdentityForHost(ctx context.Context, host, scheme string) (ports.SCMIdentity, error) {
 	key := NormalizeHost(host)
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()

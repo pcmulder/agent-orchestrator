@@ -96,7 +96,11 @@ No host allowlist — GitHub is a fixed public host.
 Forgejo is fully self-hosted — there is **no default public host**, so every
 host must appear in `AO_FORGEJO_ALLOWED_HOSTS`. The API base follows the git
 remote's scheme, so a plain-HTTP instance (e.g. a local test server at
-`127.0.0.1:3000`) is addressed with `http://`, not `https://`.
+`127.0.0.1:3000`) is addressed with `http://`, not `https://`. This applies to
+the authenticated-identity probe too: the observer passes the repo's scheme
+through to the provider's per-host identity resolution, so a plain-HTTP
+instance resolves its author identity over `http://` instead of failing with
+"server gave HTTP response to HTTPS client" on every observer tick.
 
 | Variable | Purpose |
 |---|---|
@@ -115,7 +119,8 @@ Three write paths create or update `pr` rows. All of them converge on
 `Store.WriteSCMObservation` / `Store.ClaimPR` (`pr_store.go`), which own
 identity resolution and alias collapse:
 
-1. **Observer discovery** (`discoverNewPRs`): lists open PRs per scanned repo,
+1. **Observer discovery** (`discoverNewPRs`): lists PRs per scanned repo
+   (state=all for GitLab and Forgejo, state=open for GitHub),
    attributes them to sessions by author identity + branch-prefix match, and
    persists a baseline row before the first detail fetch.
 2. **Observer refresh** (the rest of `Poll`): batch GraphQL detail fetches,
@@ -145,7 +150,7 @@ flowchart TD
     B --> C[guardRepos<br/>conditional repo-list ETag probes]
     C --> D[discoverNewPRs<br/>list open PRs, attribute, persist baselines]
     D --> E[selectRefreshCandidates<br/>listed? stale? commit-check ETag changed?]
-    E --> F[reconcileTerminalGitHubPRs<br/>tracked-open PRs missing from listing]
+    E --> F[reconcileTerminalPRs<br/>tracked-open PRs missing from listing]
     F --> G[FetchPullRequests<br/>batched GraphQL detail fetch]
     G --> H[refreshReviews<br/>per-ref review threads, own cadence]
     H --> I[dispatch loop<br/>prepareForPersistence → WriteSCMObservation → LCM]
@@ -165,8 +170,14 @@ Stage notes:
   PRs in the updated listing, PRs with a changed commit-check ETag, or PRs
   older than `DefaultPRMaxAge` are re-fetched.
 - **Terminal reconciliation** exists because GitHub's `state=open` listing
-  drops merged/closed PRs before their terminal transition can be observed;
-  GitLab lists `state=all` and does not need it.
+  drops merged/closed PRs, so a PR merged or closed externally between polls
+  can be missing from the refresh set. The pass is provider-neutral: it
+  reconciles any tracked-open PR missing from the listing for providers whose
+  listing drops terminals (GitHub; Forgejo, whose `updated_after`-ignoring
+  list can also lag a transition between the guard and the re-list). It
+  detail-fetches those PRs so the terminal transition is observed. GitLab
+  lists `state=all` on both its guard and list, so its PRs never drop out and
+  it is skipped by the pass.
 - **Review refresh** runs per-ref on its own cadence and write mode
   (replace/merge/preserve) because thread pagination is expensive and
   intentionally bounded.
@@ -319,7 +330,7 @@ and migration 0097 already enforces their uniqueness in storage.
    key: `provider:host@provider_id` when a provider ID is known, else the
    legacy `provider:host:repo#number`. All key construction goes through it —
    `discoverSubjects`, `discoverNewPRs`, `selectRefreshCandidates`,
-   `reconcileTerminalGitHubPRs`, the batch dispatch loop, `refreshReviews`,
+   `reconcileTerminalPRs`, the batch dispatch loop, `refreshReviews`,
    and the per-poll caches (`LastPRFetchAt`, `LastReviewPollAt`,
    `commitETags`, candidate/refresh bookkeeping).
 2. **Subjects carry ProviderID.** `repoForTrackedPR` keeps resolving the repo
