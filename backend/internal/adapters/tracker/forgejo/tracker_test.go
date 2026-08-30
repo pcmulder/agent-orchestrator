@@ -19,7 +19,10 @@ import (
 )
 
 // recordedReq captures one inbound HTTP request so tests can assert against
-// the exact Forgejo API surface the adapter touched.
+// the exact Forgejo API surface the adapter touched. Path is the ESCAPED path
+// (raw as sent on the wire) so a wrongly-escaped request (e.g. %2F where the
+// route expects a literal /) misses the handler map and fails the test
+// instead of silently matching.
 type recordedReq struct {
 	Method string
 	Path   string
@@ -44,6 +47,8 @@ func newFakeFJ(t *testing.T) *fakeFJ {
 	return f
 }
 
+// on registers a handler keyed on "METHOD escaped-path". The path must be
+// given in the same escaped form the adapter sends (e.g. /repos/org%2Fsub/...).
 func (f *fakeFJ) on(method, path string, h http.HandlerFunc) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -52,9 +57,13 @@ func (f *fakeFJ) on(method, path string, h http.HandlerFunc) {
 
 func (f *fakeFJ) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
-	key := r.Method + " " + r.URL.Path
+	// Key on EscapedPath (the raw path as sent) rather than the decoded
+	// r.URL.Path: a request that wrongly percent-encodes a route separator
+	// (owner%2Frepo where the Gitea route wants /repos/{owner}/{repo}) must
+	// miss the handler and fail loudly, not match the decoded form.
+	key := r.Method + " " + r.URL.EscapedPath()
 	f.mu.Lock()
-	f.requests = append(f.requests, recordedReq{Method: r.Method, Path: r.URL.Path, Body: string(body)})
+	f.requests = append(f.requests, recordedReq{Method: r.Method, Path: r.URL.EscapedPath(), Body: string(body)})
 	h, ok := f.handlers[key]
 	f.mu.Unlock()
 	if !ok {
@@ -395,6 +404,26 @@ func TestList_StateAndAssigneeFilters(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	if len(issues) != 1 || issues[0].Title != "x" {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+// TestList_NestedNamespace locks in the per-segment path escaping: the Gitea
+// route /repos/{owner}/{repo}/issues takes owner and repo as SEPARATE path
+// segments, so a nested owner (group/sub) must keep its slash literal. The
+// fake keys on EscapedPath, so the old url.PathEscape("group/sub/project")
+// behavior (one %2F-joined segment) misses the handler and fails.
+func TestList_NestedNamespace(t *testing.T) {
+	f := newFakeFJ(t)
+	f.on("GET", "/repos/group/sub/project/issues", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"number":4,"title":"nested issue","state":"open","html_url":"u4"}]`))
+	})
+	tr := newTrackerForTest(t, f)
+	issues, err := tr.List(ctx(), domain.TrackerRepo{Provider: domain.TrackerProviderForgejo, Native: "group/sub/project", Host: hostFor(f)}, domain.ListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(issues) != 1 || issues[0].Title != "nested issue" {
 		t.Fatalf("issues = %#v", issues)
 	}
 }

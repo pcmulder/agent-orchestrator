@@ -208,8 +208,11 @@ type restPull struct {
 	Mergeable bool   `json:"mergeable"`
 	HasMerged bool   `json:"merged"`
 	MergeBase string `json:"merge_base"`
-	HeadSHA   string `json:"head_sha"`
-	User      struct {
+	// MergedCommitID is null until the PR is merged; Forgejo/Gitea populate
+	// merge_commit_sha on the PR response after a successful merge (verified
+	// live on Forgejo 16.0.3).
+	MergedCommitID *string `json:"merge_commit_sha"`
+	User           struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	Base struct {
@@ -258,6 +261,7 @@ func pullToSCMPRObservation(repo ports.SCMRepo, pr *restPull) ports.SCMPRObserva
 		Title:             pr.Title,
 		Author:            pr.User.Login,
 		BaseSHA:           baseSHA(pr),
+		MergeCommitSHA:    derefString(pr.MergedCommitID),
 		ProviderState:     pr.State,
 		ProviderMergeable: strconv.FormatBool(pr.Mergeable),
 		CreatedAtProvider: safeTime(pr.Created),
@@ -302,6 +306,15 @@ func safeTime(t *time.Time) time.Time {
 		return time.Time{}
 	}
 	return *t
+}
+
+// derefString returns the pointed-to value when ptr is non-nil and
+// non-empty, otherwise "".
+func derefString(ptr *string) string {
+	if ptr == nil {
+		return ""
+	}
+	return *ptr
 }
 
 // ---------------------------------------------------------------------------
@@ -425,11 +438,6 @@ func (p *Provider) fetchSinglePR(ctx context.Context, ref ports.SCMPRRef) (ports
 	prObs := pullToSCMPRObservation(repo, &pr)
 	if requestedURL := strings.TrimSpace(ref.URL); requestedURL != "" && requestedURL != strings.TrimSpace(prObs.URL) {
 		prObs.URLAlias = requestedURL
-	}
-	prObs.MergeCommitSHA = ""
-	if pr.HasMerged {
-		// merge_commit_sha is only populated after merge; best effort.
-		prObs.MergeCommitSHA = ""
 	}
 
 	// 2. Fetch CI (commit statuses). A transient failure propagates so the

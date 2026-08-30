@@ -46,6 +46,20 @@ var (
 // that use errors.As with *RateLimitError continue to work.
 type RateLimitError = httpkit.RateLimitError
 
+// escapeRepoPath escapes the owner/repo path for the /repos/{owner}/{repo}
+// route, escaping EACH segment separately. Gitea/Forgejo's route has two path
+// segments ({username}/{reponame}), so a nested owner namespace (org/sub) must
+// keep its slash literal (org%2Fsub is a single encoded segment, matching the
+// SCM client's repoPath); escaping the whole "owner/repo" string would turn the
+// separating slash into %2F and produce /repos/owner%2Frepo/..., a 404.
+func escapeRepoPath(repoPath string) string {
+	parts := strings.Split(repoPath, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
 // Options configures a Tracker. All fields except Token are optional —
 // production code typically sets Token + AllowedHosts; tests inject
 // HTTPClient and BaseURLs to point at an httptest fake.
@@ -248,7 +262,7 @@ func (t *Tracker) Get(ctx context.Context, id domain.TrackerID) (domain.Issue, e
 	if err != nil {
 		return domain.Issue{}, err
 	}
-	path := fmt.Sprintf("/repos/%s/issues/%d", url.PathEscape(repoPath), number)
+	path := fmt.Sprintf("/repos/%s/issues/%d", escapeRepoPath(repoPath), number)
 
 	resp, err := t.do(ctx, he, http.MethodGet, path, nil)
 	if err != nil {
@@ -345,7 +359,7 @@ func (t *Tracker) List(ctx context.Context, repo domain.TrackerRepo, filter doma
 	}
 	q.Set("limit", strconv.Itoa(listPageSize))
 
-	base := "/repos/" + url.PathEscape(repoPath) + "/issues"
+	base := "/repos/" + escapeRepoPath(repoPath) + "/issues"
 	path := base + "?" + q.Encode()
 	out := make([]domain.Issue, 0)
 	if filter.Limit > 0 {

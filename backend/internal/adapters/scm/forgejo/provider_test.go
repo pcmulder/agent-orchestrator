@@ -451,6 +451,37 @@ func TestFetchPullRequestsFull(t *testing.T) {
 	_ = repo
 }
 
+func TestFetchPullRequestsMergedCarriesMergeCommitSHA(t *testing.T) {
+	_, p, host, scheme := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/acme/repo/pulls/11":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": 111, "number": 11, "state": "closed", "draft": false,
+				"html_url": "http://" + r.Host + "/acme/repo/pulls/11",
+				"merged":   true, "merge_commit_sha": "5de6ef5e0123456789abcdef0123456789abcdef",
+				"head": map[string]any{"ref": "feat/z", "sha": "head9", "repo": map[string]any{"full_name": "acme/repo"}},
+				"base": map[string]any{"ref": "main"}, "user": map[string]any{"login": "dave"},
+			})
+		case "/api/v1/repos/acme/repo/commits/head9/statuses":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case "/api/v1/repos/acme/repo/pulls/11/reviews":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		}
+	}))
+	r := testRepo(host, scheme)
+	obs, err := p.FetchPullRequests(ctx(), []ports.SCMPRRef{{Repo: r, Number: 11}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := obs[0]
+	if !o.PR.Merged || o.PR.State != string(domain.PRStateMerged) {
+		t.Fatalf("merged state not mapped: %+v", o.PR)
+	}
+	if o.PR.MergeCommitSHA != "5de6ef5e0123456789abcdef0123456789abcdef" {
+		t.Fatalf("MergeCommitSHA = %q, want the payload value", o.PR.MergeCommitSHA)
+	}
+}
+
 func TestFetchPullRequestsFailingCIAndChangesRequested(t *testing.T) {
 	_, p, host, scheme := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
