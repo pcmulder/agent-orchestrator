@@ -2942,7 +2942,7 @@ func TestAuthenticatedIdentityForHost_TwoHostsDifferentIdentities(t *testing.T) 
 	}
 
 	// gitlab.com (empty host) → alice-dotcom
-	identDefault, err := p.AuthenticatedIdentityForHost(context.Background(), "")
+	identDefault, err := p.AuthenticatedIdentityForHost(context.Background(), "", "")
 	if err != nil {
 		t.Fatalf("AuthenticatedIdentityForHost empty host: %v", err)
 	}
@@ -2954,7 +2954,7 @@ func TestAuthenticatedIdentityForHost_TwoHostsDifferentIdentities(t *testing.T) 
 	}
 
 	// self-managed host → bob-internal
-	identSelf, err := p.AuthenticatedIdentityForHost(context.Background(), "gitlab.internal")
+	identSelf, err := p.AuthenticatedIdentityForHost(context.Background(), "gitlab.internal", "")
 	if err != nil {
 		t.Fatalf("AuthenticatedIdentityForHost(gitlab.internal): %v", err)
 	}
@@ -3020,10 +3020,10 @@ func TestAuthenticatedIdentityForHost_PerHostCaching(t *testing.T) {
 	}
 
 	// First call for each host — should hit the respective API.
-	if _, err := p.AuthenticatedIdentityForHost(context.Background(), ""); err != nil {
+	if _, err := p.AuthenticatedIdentityForHost(context.Background(), "", ""); err != nil {
 		t.Fatalf("first default call: %v", err)
 	}
-	if _, err := p.AuthenticatedIdentityForHost(context.Background(), "gitlab.internal"); err != nil {
+	if _, err := p.AuthenticatedIdentityForHost(context.Background(), "gitlab.internal", ""); err != nil {
 		t.Fatalf("first self-managed call: %v", err)
 	}
 	if got := defaultCalls.Load(); got != 1 {
@@ -3034,11 +3034,11 @@ func TestAuthenticatedIdentityForHost_PerHostCaching(t *testing.T) {
 	}
 
 	// Second call for each host — must be served from cache (no API hit).
-	identDefault2, err := p.AuthenticatedIdentityForHost(context.Background(), "")
+	identDefault2, err := p.AuthenticatedIdentityForHost(context.Background(), "", "")
 	if err != nil {
 		t.Fatalf("second default call: %v", err)
 	}
-	identSelf2, err := p.AuthenticatedIdentityForHost(context.Background(), "gitlab.internal")
+	identSelf2, err := p.AuthenticatedIdentityForHost(context.Background(), "gitlab.internal", "")
 	if err != nil {
 		t.Fatalf("second self-managed call: %v", err)
 	}
@@ -3079,7 +3079,7 @@ func TestAuthenticatedIdentityDelegatesToForHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuthenticatedIdentity: %v", err)
 	}
-	ident2, err := p.AuthenticatedIdentityForHost(context.Background(), "")
+	ident2, err := p.AuthenticatedIdentityForHost(context.Background(), "", "")
 	if err != nil {
 		t.Fatalf("AuthenticatedIdentityForHost empty host: %v", err)
 	}
@@ -3104,7 +3104,7 @@ func TestAuthenticatedIdentityForHost_RejectedHost(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = p.AuthenticatedIdentityForHost(context.Background(), "gitlab.evil.example")
+	_, err = p.AuthenticatedIdentityForHost(context.Background(), "gitlab.evil.example", "")
 	if err == nil {
 		t.Fatal("expected error for non-allowlisted host, got nil")
 	}

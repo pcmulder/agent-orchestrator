@@ -226,15 +226,20 @@ func apiBaseMatches(apiBase, host, scheme string) bool {
 // token for the default host. Forgejo has no typed Bot flag, so
 // human/bot classification reuses the isBotAuthor heuristic.
 func (p *Provider) AuthenticatedIdentity(ctx context.Context) (ports.SCMIdentity, error) {
-	return p.AuthenticatedIdentityForHost(ctx, "")
+	return p.AuthenticatedIdentityForHost(ctx, "", "")
 }
 
 // AuthenticatedIdentityForHost resolves the account associated with the
-// Forgejo token for the given host. A host that is not in the allowlist
-// returns an error. Successful results are cached per-host for the
-// provider's lifetime — a second call for the same host does not hit the API.
-func (p *Provider) AuthenticatedIdentityForHost(ctx context.Context, host string) (ports.SCMIdentity, error) {
-	key := NormalizeHost(host)
+// Forgejo token for the given host and API scheme. A host that is not in the
+// allowlist returns an error. The scheme (from the git remote, "http" for
+// plain-HTTP instances) selects the API base scheme, so a plain-HTTP instance
+// is probed with http:// instead of the https default — a wrong scheme
+// surfaces as "server gave HTTP response to HTTPS client" and would
+// otherwise break author attribution and spam the observer log every tick.
+// Successful results are cached per host+scheme for the provider's lifetime —
+// a second call for the same host+scheme does not hit the API.
+func (p *Provider) AuthenticatedIdentityForHost(ctx context.Context, host, scheme string) (ports.SCMIdentity, error) {
+	key := NormalizeHost(host) + "|" + defaultSchemeForRemote(scheme)
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
 	if p.hostIdentities == nil {
@@ -244,7 +249,7 @@ func (p *Provider) AuthenticatedIdentityForHost(ctx context.Context, host string
 		return ident, nil
 	}
 
-	client := p.clientForHost(host, "")
+	client := p.clientForHost(host, scheme)
 	if client == nil {
 		return ports.SCMIdentity{}, fmt.Errorf("forgejo scm: host %q not in allowlist: %w", host, ErrHostNotAllowed)
 	}

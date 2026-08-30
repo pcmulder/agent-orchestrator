@@ -532,7 +532,7 @@ func TestAuthenticatedIdentityForProvider_DelegatesToCorrectSubProvider(t *testi
 	gl := &fakeProvider{key: "gitlab", identity: glIdentity}
 	m := New(NamedProvider{Key: "github", Provider: gh}, NamedProvider{Key: "gitlab", Provider: gl})
 
-	got, err := m.AuthenticatedIdentityForProvider(context.Background(), "github", "")
+	got, err := m.AuthenticatedIdentityForProvider(context.Background(), "github", "", "")
 	if err != nil {
 		t.Fatalf("github: unexpected error: %v", err)
 	}
@@ -540,7 +540,7 @@ func TestAuthenticatedIdentityForProvider_DelegatesToCorrectSubProvider(t *testi
 		t.Errorf("github identity = %+v, want %+v", got, ghIdentity)
 	}
 
-	got, err = m.AuthenticatedIdentityForProvider(context.Background(), "gitlab", "")
+	got, err = m.AuthenticatedIdentityForProvider(context.Background(), "gitlab", "", "")
 	if err != nil {
 		t.Fatalf("gitlab: unexpected error: %v", err)
 	}
@@ -556,7 +556,7 @@ func TestAuthenticatedIdentityForProvider_UnknownProviderReturnsError(t *testing
 	gh := &fakeProvider{key: "github", identity: ports.SCMIdentity{Login: "octocat"}}
 	m := New(NamedProvider{Key: "github", Provider: gh})
 
-	_, err := m.AuthenticatedIdentityForProvider(context.Background(), "bitbucket", "")
+	_, err := m.AuthenticatedIdentityForProvider(context.Background(), "bitbucket", "", "")
 	if err == nil {
 		t.Fatal("expected error for unknown provider")
 	}
@@ -635,10 +635,12 @@ type fakeHostScopedProvider struct {
 	hostIdentities map[string]ports.SCMIdentity
 	hostErrs       map[string]error
 	hostCalls      []string
+	schemeCalls    []string // records the API scheme passed per call
 }
 
-func (f *fakeHostScopedProvider) AuthenticatedIdentityForHost(_ context.Context, host string) (ports.SCMIdentity, error) {
+func (f *fakeHostScopedProvider) AuthenticatedIdentityForHost(_ context.Context, host, scheme string) (ports.SCMIdentity, error) {
 	f.hostCalls = append(f.hostCalls, host)
+	f.schemeCalls = append(f.schemeCalls, scheme)
 	if err, ok := f.hostErrs[host]; ok {
 		return ports.SCMIdentity{}, err
 	}
@@ -671,7 +673,7 @@ func TestAuthenticatedIdentityForProvider_DelegatesHostToSubProvider(t *testing.
 	)
 
 	// GitHub ignores host — delegates to AuthenticatedIdentity.
-	got, err := m.AuthenticatedIdentityForProvider(context.Background(), "github", "github.com")
+	got, err := m.AuthenticatedIdentityForProvider(context.Background(), "github", "github.com", "")
 	if err != nil {
 		t.Fatalf("github: unexpected error: %v", err)
 	}
@@ -683,7 +685,7 @@ func TestAuthenticatedIdentityForProvider_DelegatesHostToSubProvider(t *testing.
 	}
 
 	// GitLab gitlab.com (empty host) — delegates to AuthenticatedIdentityForHost("").
-	got, err = m.AuthenticatedIdentityForProvider(context.Background(), "gitlab", "")
+	got, err = m.AuthenticatedIdentityForProvider(context.Background(), "gitlab", "", "")
 	if err != nil {
 		t.Fatalf("gitlab default: unexpected error: %v", err)
 	}
@@ -692,7 +694,7 @@ func TestAuthenticatedIdentityForProvider_DelegatesHostToSubProvider(t *testing.
 	}
 
 	// GitLab self-managed host — delegates to AuthenticatedIdentityForHost("gitlab.internal").
-	got, err = m.AuthenticatedIdentityForProvider(context.Background(), "gitlab", "gitlab.internal")
+	got, err = m.AuthenticatedIdentityForProvider(context.Background(), "gitlab", "gitlab.internal", "")
 	if err != nil {
 		t.Fatalf("gitlab self-managed: unexpected error: %v", err)
 	}
@@ -703,5 +705,34 @@ func TestAuthenticatedIdentityForProvider_DelegatesHostToSubProvider(t *testing.
 	// Verify the host parameter was passed through correctly.
 	if len(gl.hostCalls) != 2 || gl.hostCalls[0] != "" || gl.hostCalls[1] != "gitlab.internal" {
 		t.Errorf("host calls = %v, want [\"\" \"gitlab.internal\"]", gl.hostCalls)
+	}
+}
+
+// TestAuthenticatedIdentityForProvider_DelegatesSchemeToSubProvider verifies
+// that the multi provider passes the API scheme through to host-scoped
+// sub-providers (Forgejo), so a plain-HTTP instance resolves identity over
+// http:// rather than the https default (BUG A). The scheme is empty for the
+// GitHub (not host-scoped) and GitLab (scheme-ignoring) calls below.
+func TestAuthenticatedIdentityForProvider_DelegatesSchemeToSubProvider(t *testing.T) {
+	fjIdentity := ports.SCMIdentity{Login: "ao-admin", Human: true}
+	fj := &fakeHostScopedProvider{
+		fakeProvider: &fakeProvider{key: "forgejo", identity: fjIdentity},
+		hostIdentities: map[string]ports.SCMIdentity{
+			"127.0.0.1:3000": fjIdentity,
+		},
+	}
+	m := New(NamedProvider{Key: "forgejo", Provider: fj})
+
+	// Plain-HTTP host: the remote's http scheme must be passed through.
+	if _, err := m.AuthenticatedIdentityForProvider(context.Background(), "forgejo", "127.0.0.1:3000", "http"); err != nil {
+		t.Fatalf("forgejo http: unexpected error: %v", err)
+	}
+	// https host on the same instance: the https scheme is passed through.
+	if _, err := m.AuthenticatedIdentityForProvider(context.Background(), "forgejo", "127.0.0.1:3000", "https"); err != nil {
+		t.Fatalf("forgejo https: unexpected error: %v", err)
+	}
+
+	if len(fj.schemeCalls) != 2 || fj.schemeCalls[0] != "http" || fj.schemeCalls[1] != "https" {
+		t.Errorf("scheme calls = %v, want [\"http\" \"https\"]", fj.schemeCalls)
 	}
 }

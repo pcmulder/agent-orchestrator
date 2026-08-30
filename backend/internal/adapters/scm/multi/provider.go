@@ -241,11 +241,11 @@ type identityResolver interface {
 
 // hostScopedIdentityResolver is the type assertion used by
 // AuthenticatedIdentityForProvider to delegate to a sub-provider's
-// per-host identity method (e.g. GitLab's AuthenticatedIdentityForHost).
-// Host-scoped sub-providers satisfy this interface in addition to, or
-// instead of, identityResolver.
+// per-host identity method (e.g. GitLab's and Forgejo's
+// AuthenticatedIdentityForHost). Host-scoped sub-providers satisfy this
+// interface in addition to, or instead of, identityResolver.
 type hostScopedIdentityResolver interface {
-	AuthenticatedIdentityForHost(ctx context.Context, host string) (ports.SCMIdentity, error)
+	AuthenticatedIdentityForHost(ctx context.Context, host, scheme string) (ports.SCMIdentity, error)
 }
 
 // SCMCredentialsAvailable returns true if ANY sub-provider has usable credentials.
@@ -289,19 +289,20 @@ func repoFullNameFromRef(repo ports.SCMRepo) string {
 }
 
 // AuthenticatedIdentityForProvider resolves the authenticated identity for the
-// sub-provider matching the given provider key. The host parameter is passed
-// through to host-scoped sub-providers (e.g. GitLab) so that self-managed
-// hosts resolve identity against the correct client. Sub-providers that are
-// not host-scoped (e.g. GitHub) ignore the host parameter. It satisfies
-// ports.ScopedIdentityResolver.
-func (m *Provider) AuthenticatedIdentityForProvider(ctx context.Context, provider, host string) (ports.SCMIdentity, error) {
+// sub-provider matching the given provider key. The host and scheme parameters
+// are passed through to host-scoped sub-providers (e.g. GitLab, Forgejo) so
+// that self-managed hosts resolve identity against the correct client and
+// plain-HTTP instances are addressed with the remote's scheme rather than the
+// https default. Sub-providers that are not host-scoped (e.g. GitHub) ignore
+// both parameters. It satisfies ports.ScopedIdentityResolver.
+func (m *Provider) AuthenticatedIdentityForProvider(ctx context.Context, provider, host, scheme string) (ports.SCMIdentity, error) {
 	p, err := m.resolve(provider)
 	if err != nil {
 		return ports.SCMIdentity{}, err
 	}
-	// Prefer the host-scoped path when the sub-provider supports it (GitLab).
+	// Prefer the host-scoped path when the sub-provider supports it (GitLab, Forgejo).
 	if hs, ok := p.(hostScopedIdentityResolver); ok {
-		return hs.AuthenticatedIdentityForHost(ctx, host)
+		return hs.AuthenticatedIdentityForHost(ctx, host, scheme)
 	}
 	// Fall back to the non-host-scoped path (GitHub).
 	resolver, ok := p.(identityResolver)

@@ -118,12 +118,14 @@ type SCMIdentityResolver interface {
 }
 
 // ScopedIdentityResolver resolves the authenticated identity for a specific
-// provider key and host. Multi-provider implementations use this to delegate
-// to the matching sub-provider's identity method, passing host through so
-// that self-managed GitLab hosts resolve identity against the correct client.
-// GitHub sub-providers ignore host (their identity is not host-scoped).
+// provider key, host, and API scheme. Multi-provider implementations use this
+// to delegate to the matching sub-provider's identity method, passing host
+// through so that self-managed hosts resolve identity against the correct
+// client. GitHub sub-providers ignore host (their identity is not
+// host-scoped); scheme-aware providers (Forgejo) use it to address plain-HTTP
+// instances with http:// instead of the https default.
 type ScopedIdentityResolver interface {
-	AuthenticatedIdentityForProvider(ctx context.Context, provider, host string) (SCMIdentity, error)
+	AuthenticatedIdentityForProvider(ctx context.Context, provider, host, scheme string) (SCMIdentity, error)
 }
 
 // SCMPRObservation carries provider-neutral PR metadata.

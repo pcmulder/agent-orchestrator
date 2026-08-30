@@ -46,11 +46,14 @@
 // # Incremental discovery
 //
 // The Forgejo API has no updated_after filter and no ETag revalidation on
-// list endpoints. RepoPRListGuard therefore fingerprints the open-PR listing
-// (sha256 of the response) and reports NotModified when the fingerprint is
-// unchanged, so steady-state repos skip the per-PR detail fetches;
-// ListPRsByRepo ignores its updatedAfter cursor and fetches the full listing.
-// CommitChecksGuard fingerprints the commit-status set the same way. The
-// observer's DefaultPRMaxAge still bounds staleness for the head-SHA-unchanged
-// case.
+// list endpoints. RepoPRListGuard therefore fingerprints the all-states PR
+// listing (state=all, sha256 of the response) and reports NotModified when the
+// fingerprint is unchanged, so steady-state repos skip the per-PR detail
+// fetches; a PR transitioning to merged/closed changes the fingerprint, so the
+// transition is detected on the next poll (matching GitLab's state=all guard).
+// ListPRsByRepo lists state=all (matching GitLab) so closed/merged PRs are
+// observed by the normal refresh path, and ignores its updatedAfter cursor
+// (there is no equivalent filter). CommitChecksGuard fingerprints the
+// commit-status set the same way. The observer's DefaultPRMaxAge still bounds
+// staleness for the head-SHA-unchanged case.
 package forgejo

@@ -130,17 +130,22 @@ func makeRepo(host, scheme, owner, name string) ports.SCMRepo {
 // RepoPRListGuard
 // ---------------------------------------------------------------------------
 
-// RepoPRListGuard reports whether the open-PR list of a repository should be
+// RepoPRListGuard reports whether the PR list of a repository should be
 // refreshed. The Forgejo API has no ETag revalidation, so the guard fetches
-// the open-PR listing and returns a sha256 fingerprint of it as the ETag:
-// an unchanged listing yields NotModified=true so the observer skips the
-// (cheaper) re-list and the expensive per-PR detail fetches, while any
-// change (new PR, closed PR, edited PR) flips the guard. The observer's
-// DefaultPRMaxAge backstop still bounds staleness for the head-SHA-unchanged
-// case (a PR whose metadata changed without updating its head, e.g. a title
-// edit with no push).
+// the all-states PR listing and returns a sha256 fingerprint of it as the
+// ETag: an unchanged listing yields NotModified=true so the observer skips
+// the (cheaper) re-list and the expensive per-PR detail fetches, while any
+// change (new PR, PR edited, or a PR transitioning to merged/closed) flips
+// the guard. state=all — not state=open — is used so a PR that merges between
+// polls is detected by the fingerprint change (its state/merged fields move),
+// exactly as GitLab's state=all guard behaves; a state=open guard would also
+// flip on merge (the PR drops out), but state=all keeps the guard's meaning
+// ("has the set of PRs this repo serves changed") consistent with the
+// state=all list below. The observer's DefaultPRMaxAge backstop still bounds
+// staleness for the head-SHA-unchanged case (a PR whose metadata changed
+// without updating its head, e.g. a title edit with no push).
 func (p *Provider) RepoPRListGuard(ctx context.Context, repo ports.SCMRepo, etag string) (ports.SCMGuardResult, error) {
-	q := url.Values{"state": {"open"}, "limit": {strconv.Itoa(perPage)}}
+	q := url.Values{"state": {"all"}, "limit": {strconv.Itoa(perPage)}}
 	hc, err := p.clientForRepoErr(repo)
 	if err != nil {
 		return ports.SCMGuardResult{}, err
@@ -166,14 +171,19 @@ func (p *Provider) RepoPRListGuard(ctx context.Context, repo ports.SCMRepo, etag
 // ---------------------------------------------------------------------------
 
 // ListPRsByRepo lists pull requests in a repository. The Forgejo API has no
-// updated_after filter, so the full open listing is returned on every call
-// (updatedAfter is ignored); terminal PRs are not listed, which matches the
-// GitHub-style discovery the observer already handles (see
-// reconcileTerminalGitHubPRs, which is GitHub-only — Forgejo open PRs that
-// merge between polls are picked up by the lifecycle merge path).
+// updated_after filter, so the full listing is returned on every call
+// (updatedAfter is ignored). It uses state=all (matching GitLab) so
+// closed/merged PRs are listed and their terminal transition is observed by
+// the normal refresh path — an externally merged PR flips pr_state to
+// merged/closed on its next poll instead of staying open forever. Discovery
+// of new PRs and refresh-candidate selection are unaffected by the extra
+// terminal rows: discovery attributes only non-tracked PRs, and the
+// observer's terminal-reconciliation pass (reconcileTerminalPRs) covers the
+// residual case where a PR transitions between the guard fingerprint and the
+// re-list.
 func (p *Provider) ListPRsByRepo(ctx context.Context, repo ports.SCMRepo, _ time.Time) ([]ports.SCMPRObservation, error) {
 	var result []ports.SCMPRObservation
-	q := url.Values{"state": {"open"}, "limit": {strconv.Itoa(perPage)}}
+	q := url.Values{"state": {"all"}, "limit": {strconv.Itoa(perPage)}}
 	hc, err := p.clientForRepoErr(repo)
 	if err != nil {
 		return nil, err
